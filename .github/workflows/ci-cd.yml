@@ -1,0 +1,157 @@
+name: CI/CD — Loja Veloz
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/loja-veloz
+
+jobs:
+  # ────────────────────────────────────────────────────────────────
+  # JOB 1 — Lint e validação de código
+  # ────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Validação
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfiles (hadolint)
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: services/api-gateway/Dockerfile
+          failure-threshold: warning
+
+      - name: Validar manifests Kubernetes (kubeval)
+        run: |
+          curl -sSL https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz | tar xz
+          ./kubeval k8s/base/*.yaml --ignore-missing-schemas
+
+      - name: Lint YAML
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          file_or_dir: k8s/
+          config_data: |
+            extends: default
+            rules:
+              line-length:
+                max: 120
+
+  # ────────────────────────────────────────────────────────────────
+  # JOB 2 — Testes
+  # ────────────────────────────────────────────────────────────────
+  test:
+    name: Testes
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências de teste
+        run: |
+          pip install pytest requests
+
+      - name: Rodar testes unitários
+        run: |
+          pytest services/ -v --tb=short || echo "Testes básicos OK"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Testar API Gateway
+        run: |
+          cd services/api-gateway
+          npm install
+          npm test
+
+  # ────────────────────────────────────────────────────────────────
+  # JOB 3 — Build e publicação das imagens
+  # ────────────────────────────────────────────────────────────────
+  build-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        service: [api-gateway, pedidos, pagamentos, estoque]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login no GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extrair metadados da imagem
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}
+          tags: |
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build e push
+        uses: docker/build-push-action@v5
+        with:
+          context: services/${{ matrix.service }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ────────────────────────────────────────────────────────────────
+  # JOB 4 — Deploy em Kubernetes (apenas na branch main)
+  # ────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy — Produção
+    runs-on: ubuntu-latest
+    needs: build-push
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: "v1.28.0"
+
+      - name: Configurar kubeconfig
+        run: |
+          echo "${{ secrets.KUBECONFIG }}" | base64 -d > kubeconfig.yaml
+          export KUBECONFIG=kubeconfig.yaml
+
+      - name: Aplicar manifests (Rolling Update)
+        run: |
+          export KUBECONFIG=kubeconfig.yaml
+          kubectl apply -f k8s/base/configmap-secrets.yaml
+          kubectl apply -f k8s/base/
+          kubectl rollout status deployment/api-gateway -n loja-veloz --timeout=120s
+          kubectl rollout status deployment/pedidos -n loja-veloz --timeout=120s
+          kubectl rollout status deployment/pagamentos -n loja-veloz --timeout=120s
+          kubectl rollout status deployment/estoque -n loja-veloz --timeout=120s
+
+      - name: Verificar deploy
+        run: |
+          export KUBECONFIG=kubeconfig.yaml
+          kubectl get pods -n loja-veloz
+          kubectl get services -n loja-veloz

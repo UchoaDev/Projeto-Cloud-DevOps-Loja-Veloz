@@ -1,0 +1,202 @@
+version: "3.9"
+
+networks:
+  loja-veloz-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+
+services:
+
+  # ─── API Gateway ───────────────────────────────────────────────
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    image: loja-veloz/api-gateway:latest
+    container_name: api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - PEDIDOS_URL=http://pedidos:8081
+      - PAGAMENTOS_URL=http://pagamentos:8082
+      - ESTOQUE_URL=http://estoque:8083
+    depends_on:
+      - pedidos
+      - pagamentos
+      - estoque
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Serviço de Pedidos ────────────────────────────────────────
+  pedidos:
+    build:
+      context: ./services/pedidos
+      dockerfile: Dockerfile
+    image: loja-veloz/pedidos:latest
+    container_name: pedidos
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-pedidosdb}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Serviço de Pagamentos ─────────────────────────────────────
+  pagamentos:
+    build:
+      context: ./services/pagamentos
+      dockerfile: Dockerfile
+    image: loja-veloz/pagamentos:latest
+    container_name: pagamentos
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-pedidosdb}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - PAYMENT_GATEWAY_URL=${PAYMENT_GATEWAY_URL:-https://sandbox.pagamentos.com}
+      - PAYMENT_API_KEY=${PAYMENT_API_KEY:-sandbox-key}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8082/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Serviço de Estoque ────────────────────────────────────────
+  estoque:
+    build:
+      context: ./services/estoque
+      dockerfile: Dockerfile
+    image: loja-veloz/estoque:latest
+    container_name: estoque
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-pedidosdb}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── PostgreSQL ────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    environment:
+      - POSTGRES_DB=${DB_NAME:-pedidosdb}
+      - POSTGRES_USER=${DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── RabbitMQ (Mensageria) ─────────────────────────────────────
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"   # painel de gerenciamento
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Prometheus (Métricas) ─────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ci/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped
+
+  # ─── Grafana (Dashboards) ──────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped
+
+  # ─── Jaeger (Tracing Distribuído) ──────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.50
+    container_name: jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+    networks:
+      - loja-veloz-net
+    restart: unless-stopped

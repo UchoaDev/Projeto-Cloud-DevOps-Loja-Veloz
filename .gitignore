@@ -1,0 +1,36 @@
+# Variáveis de ambiente (NUNCA subir para o git)
+.env
+*.env.local
+
+# Terraform state
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Node.js
+node_modules/
+npm-debug.log*
+
+# Kubernetes kubeconfig
+kubeconfig.yaml
+kubeconfig
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

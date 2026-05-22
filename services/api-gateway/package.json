@@ -1,0 +1,11 @@
+{
+  "name": "api-gateway",
+  "version": "1.0.0",
+  "description": "API Gateway da Loja Veloz",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo 'Sem testes unitários no gateway' && exit 0"
+  },
+  "dependencies": {}
+}
