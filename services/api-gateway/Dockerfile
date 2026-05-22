@@ -1,33 +1,15 @@
-# ─────────────────────────────────────────────────────────────────
-# Stage 1 — Build
-# ─────────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:20-alpine
 
-WORKDIR /app
-
-# Instala dependências primeiro (cache de camadas)
-COPY package*.json ./
-RUN npm ci --only=production
-
-# Copia código-fonte
-COPY . .
-
-# ─────────────────────────────────────────────────────────────────
-# Stage 2 — Produção (imagem enxuta)
-# ─────────────────────────────────────────────────────────────────
-FROM node:20-alpine AS production
-
-# Boas práticas: usuário não-root
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 WORKDIR /app
 
-# Copia apenas o necessário do estágio de build
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/index.js ./
-COPY --from=builder /app/package.json ./
+COPY package*.json ./
 
-# Define usuário não-root
+RUN npm install --omit=dev
+
+COPY . .
+
 USER appuser
 
 EXPOSE 8080
